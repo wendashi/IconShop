@@ -4,7 +4,7 @@ import torch
 import argparse
 import numpy as np
 
-from model.decoder import SketchDecoder
+from model.decoder import SketchDecoder # model.decoder
 from deepsvg.difflib.tensor import SVGTensor
 from deepsvg.svglib.svg import SVG
 from deepsvg.svglib.geom import Bbox
@@ -13,13 +13,20 @@ from transformers import AutoTokenizer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 NUM_SAMPLE = 8
-BS = 4
+BS = 8 #4
 BBOX = 200
 
 
 def sample(args, cfg):
     device = torch.device("cuda:0")
+
+    # 记录初始的GPU内存使用情况
+    initial_gpu_memory = torch.cuda.memory_allocated(device=device)
+    print(f'Initial GPU memory allocated: {initial_gpu_memory / 1024 / 1024:.2f} MB')
     tokenizer = AutoTokenizer.from_pretrained(cfg['tokenizer_name'])
+
+    # 打印词汇表大小
+    print("Vocabulary size:", tokenizer.vocab_size)
 
     sketch_decoder = SketchDecoder(
         config={
@@ -42,15 +49,13 @@ def sample(args, cfg):
         os.makedirs(args.output)
     
     texts = [
-        'calendar',
-        'emotion,face,sad',
-        'bug,spider',
-        'trash,basket,garbage',
-        'car',
-        'star',
-        'signal,wifi',
-        'book,agenda',
+        'cute calendar',
     ]
+
+    # texts = [
+    #     'new rock icon',
+    #     'street wear icon',
+    # ]
 
     for text in texts:
         print(f'Generate SVG for "{text}"...')
@@ -76,10 +81,26 @@ def sample(args, cfg):
         generated_svg = []
         start_time = time.time()
         while len(generated_svg) < NUM_SAMPLE:
+            # 在每次循环中，检查并打印GPU内存使用情况
+            current_gpu_memory = torch.cuda.memory_allocated(device=device)
+            cached_gpu_memory = torch.cuda.memory_cached(device=device)
+            current_gpu_memory_gb = current_gpu_memory / (1024 ** 3)
+            cached_gpu_memory_gb = cached_gpu_memory / (1024 ** 3)
+            print(f'GPU Memory Allocated: {current_gpu_memory_gb:.2f} GB, Cached: {cached_gpu_memory_gb:.2f} GB')
+
+            # print('tokenized_text shape:',tokenized_text.shape)# torch.Size([4, 50])
+
             sample_pixels = sketch_decoder.sample(n_samples=BS, text=tokenized_text)
             generated_svg += sample_pixels
         end_time = time.time()
         print(f'Generate {len(generated_svg)} svg in {end_time - start_time} seconds')
+
+        # 循环结束后，再次计算并打印GPU内存使用情况
+        final_gpu_memory = torch.cuda.memory_allocated(device=device)
+        final_cached_gpu_memory = torch.cuda.memory_cached(device=device)
+        final_gpu_memory_gb = final_gpu_memory / (1024 ** 3)
+        final_gpu_memory_gb = final_cached_gpu_memory / (1024 ** 3)
+        print(f'\nFinal GPU Memory Allocated: {final_gpu_memory_gb:.2f} GB, Cached: {final_gpu_memory_gb:.2f} GB')
         
         # convert token sequence into SVG
         print('Rendering...')
@@ -159,7 +180,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--sketch_weight", type=str, required=True)
-    args = parser.parse_args()
+    # args = parser.parse_args()
+
+    # 手动创建命名空间对象并为其赋默认值
+    args = argparse.Namespace(
+        output="samples/",
+        sketch_weight="proj_log/FIGR_SVG/epoch_100"
+    )
 
     cfg = {
         'pix_len': 512,

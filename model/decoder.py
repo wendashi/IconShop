@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from einops import rearrange
+import onnxruntime
 
 """
 0: SVG END
@@ -89,6 +90,13 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+import logging
+
+# 设置 logging 配置
+logging.basicConfig(filename='model.log', level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
+
 class SketchDecoder(nn.Module):
   """
   Autoregressive generative model 
@@ -148,20 +156,38 @@ class SketchDecoder(nn.Module):
       self.text_pos_emb = nn.Embedding.from_pretrained(torch.load(pos_emb_path, map_location='cpu'))
       assert self.embed_dim == self.text_pos_emb.weight.shape[1], 'emb_dim must match pretrained text embedded dim'
 
-  def forward(self, pix, xy, mask, text, return_loss=False):
+  def forward(self, pix, xy, mask, text, sign, eturn_loss=False):
     '''
     pix.shape  [batch_size, max_len]
     xy.shape   [batch_size, max_len, 2]
-    mask.shape [batch_size, max_len]
+    # mask.shape [batch_size, max_len]
     text.shape [batch_size, text_len]
     '''
-    pixel_v = pix[:, :-1] if return_loss else pix
-    xy_v = xy[:, :-1] if return_loss else xy
-    pixel_mask = mask[:, :-1] if return_loss else mask
+    # pixel_v = pix[:, :-1] if return_loss else pix
+    # xy_v = xy[:, :-1] if return_loss else xy
+    # pixel_mask = mask[:, :-1] if return_loss else mask
+
+    pixel_v = pix
+    xy_v = xy
+    pixel_mask = mask
 
     c_bs, c_seqlen, device = text.shape[0], text.shape[1], text.device
-    if pixel_v[0] is not None:
-      c_seqlen += pixel_v.shape[1]  
+    # print('pixel_v-1', pixel_v.shape)
+    # if pixel_v[0] is not None: 
+    # if not (pixel_v == 0).all():
+    # if not k == text.shape[1]:
+    if sign != 0:
+      c_seqlen += pixel_v.shape[1]  #第一次跳过，之后都不跳过
+    
+    # # 初始化标志位 flag
+    # flag = False # 循环外！
+
+    # if pixel_v.shape[-1] == 1:
+    #     if flag:
+    #         c_seqlen += pixel_v.shape[1]
+    #     flag = True
+    # else:
+    #     c_seqlen += pixel_v.shape[1]
 
     # Context embedding values
     context_embedding = torch.zeros((1, c_bs, self.embed_dim)).to(device) # [1, bs, dim]
@@ -170,7 +196,11 @@ class SketchDecoder(nn.Module):
     tokens = self.text_emb(text)
 
     # Data input embedding
-    if pixel_v[0] is not None:
+    # print('pixel_v-2', pixel_v.shape)
+    # if pixel_v[0] is not None: #第一次跳过，之后都不跳过
+    # if not (pixel_v == 0).all():
+    # if not k == text.shape[1]:
+    if sign != 0:
       # coord_embed.shape [batch_size, max_len-1, emb_dim]
       # pixel_embed.shape [batch_size, max_len-1, emb_dim] 
       coord_embed = self.coord_embed_x(xy_v[...,0]) + self.coord_embed_y(xy_v[...,1]) # [bs, vlen, dim]
@@ -188,9 +218,9 @@ class SketchDecoder(nn.Module):
     
     # nopeak_mask.shape [c_seqlen+1, c_seqlen+1]
     nopeak_mask = torch.nn.Transformer.generate_square_subsequent_mask(c_seqlen+1).to(device)  # masked with -inf
-    if pixel_mask is not None:
-      # pixel_mask.shape [batch_size, text_len+max_len]
-      pixel_mask = torch.cat([(torch.zeros([c_bs, context_embedding.shape[0]+self.text_len])==1).to(device), pixel_mask], axis=1)  
+    # if pixel_mask is not None:
+    #   # pixel_mask.shape [batch_size, text_len+max_len]
+    #   pixel_mask = torch.cat([(torch.zeros([c_bs, context_embedding.shape[0]+self.text_len])==1).to(device), pixel_mask], axis=1)  
     decoder_out = self.decoder(tgt=decoder_inputs, memory=memory_encode, memory_key_padding_mask=None,
                                tgt_mask=nopeak_mask, tgt_key_padding_mask=pixel_mask)
 
@@ -202,21 +232,21 @@ class SketchDecoder(nn.Module):
     max_neg_value = -torch.finfo(logits.dtype).max
     logits.masked_fill_(logits_mask, max_neg_value)
 
-    if return_loss:
-      logits = rearrange(logits, 'b n c -> b c n')
-      text_logits = logits[:, :, :self.text_len]
-      pix_logits = logits[:, :, self.text_len:]
+    # if return_loss:
+    #   logits = rearrange(logits, 'b n c -> b c n')
+    #   text_logits = logits[:, :, :self.text_len]
+    #   pix_logits = logits[:, :, self.text_len:]
 
-      pix_logits = rearrange(pix_logits, 'b c n -> (b n) c')
-      pix_mask = ~mask.reshape(-1)
-      pix_target = pix.reshape(-1) + self.num_text_token
+    #   pix_logits = rearrange(pix_logits, 'b c n -> (b n) c')
+    #   pix_mask = ~mask.reshape(-1)
+    #   pix_target = pix.reshape(-1) + self.num_text_token
 
-      text_loss = F.cross_entropy(text_logits, text)
-      pix_loss = F.cross_entropy(pix_logits[pix_mask], pix_target[pix_mask], ignore_index=MASK+self.num_text_token)
-      loss = (text_loss + self.loss_img_weight * pix_loss) / (self.loss_img_weight + 1)
-      return loss, pix_loss, text_loss
-    else:
-      return logits
+    #   text_loss = F.cross_entropy(text_logits, text)
+    #   pix_loss = F.cross_entropy(pix_logits[pix_mask], pix_target[pix_mask], ignore_index=MASK+self.num_text_token)
+    #   loss = (text_loss + self.loss_img_weight * pix_loss) / (self.loss_img_weight + 1)
+    #   return loss, pix_loss, text_loss
+    # else:
+    return logits
     
 
   def sample(self, n_samples, text, pixel_seq=None, xy_seq=None):
@@ -235,18 +265,59 @@ class SketchDecoder(nn.Module):
     xy_grid = (np.array((xx.ravel(), yy.ravel())).T).astype(int)
     for pixel, xy in enumerate(xy_grid):
       pixel2xy[pixel] = xy+COORD_PAD+SVG_END
+    
+    # for 循环外初始化！
+    onnx_path_0 = '/home/stone/Desktop/AnyFont/IconShop/iconshop_0.onnx'
+    onnx_path_1 = '/home/stone/Desktop/AnyFont/IconShop/iconshop_1.onnx'
+
+    # 使用 ONNX Runtime 初始化 session
+    ort_session_0 = onnxruntime.InferenceSession(onnx_path_0, providers=["CUDAExecutionProvider"])
+    ort_session_1 = onnxruntime.InferenceSession(onnx_path_1, providers=["CUDAExecutionProvider"])
 
     # Sample per token
     text = text[:, :self.text_len]
     pixlen = 0 if pixel_seq is None else pixel_seq.shape[1]
+    sign = 0
     for k in range(text.shape[1] + pixlen, self.total_seq_len):
       if k == text.shape[1]:
-        pixel_seq = [None] * n_samples
-        xy_seq = [None, None] * n_samples
+        # pixel_seq = [None] * n_samples #[BS, 1]
+        # xy_seq = [None, None] * n_samples #[BS, 2]
+        device = torch.device("cuda:0")
+
+        # 初始化 pixel_seq 和 xy_seq 为全零张量
+        pixel_seq = torch.zeros([n_samples, 1], device=device)
+        xy_seq = torch.zeros([n_samples, 1, 2], device=device)
       
       # pass through model
       with torch.no_grad():
-        p_pred = self.forward(pixel_seq, xy_seq, None, text)
+        # print('text_shape', text) # text_shape torch.Size([8, 50])
+        pixel_seq = pixel_seq.cpu().numpy()
+        xy_seq = xy_seq.cpu().numpy()
+        if not isinstance(text, torch.Tensor):
+          text = torch.from_numpy(text)
+        text = text.cpu().numpy()
+        # print('pixel_seq', pixel_seq) # torch.Size([4, 2]); torch.Size([8, 1])
+        # print('xy_seq', xy_seq) # torch.Size([4, 2, 2]); torch.Size([8, 1, 2]), torch.Size([8, 2, 2]), torch.Size([8, 3, 2]), torch.Size([8, 4, 2]), torch.Size([8, 65, 2])
+
+        # 准备输入数据并运行推理
+        if sign == 0:
+          ort_inputs_0 = {
+              'text': text
+          }
+          p_pred = ort_session_0.run(['output'], ort_inputs_0)
+        else:
+          ort_inputs_1 = {
+                'pixel_seq': pixel_seq,
+                'xy_seq': xy_seq,
+                'text': text
+          }
+          p_pred = ort_session_1.run(['output'], ort_inputs_1)
+
+        p_pred = torch.from_numpy(p_pred[0]) # onnx 的输出都只取[0]
+        # p_pred = self.forward(pixel_seq, xy_seq, None, text, sign)
+        sign += 1
+        print('sign', sign)
+        # print('p_pred', p_pred) # torch.Size([4, 52, 70528]), torch.Size([8, 139, 70528])
         p_logits = p_pred[:, -1, :]
 
       next_pixels = []
@@ -271,12 +342,22 @@ class SketchDecoder(nn.Module):
       # Add next tokens
       nextp_seq = torch.LongTensor(next_pixels).view(len(next_pixels), 1).cuda()
       nextxy_seq = torch.LongTensor(next_xys).unsqueeze(1).cuda()
-      
-      if pixel_seq[0] is None:
+
+      # print('pixel_seq-3', pixel_seq.shape)
+
+      # if pixel_seq[0] is None: # 第一次不跳过，之后都跳过
+      # if (pixel_seq == 0).all():
+      if k == text.shape[1]:
         pixel_seq = nextp_seq
         xy_seq = nextxy_seq
       else:
-        pixel_seq = torch.cat([pixel_seq, nextp_seq], 1)
+        # print('pixel_seq-4', pixel_seq.shape)
+        if not isinstance(pixel_seq, torch.Tensor):
+          pixel_seq = torch.from_numpy(pixel_seq).to(device)
+        pixel_seq = torch.cat([pixel_seq, nextp_seq], 1) # 这步增加 pixel_seq[-1] seq 长度，WHY?
+        # print('pixel_seq-5', pixel_seq.shape)
+        if not isinstance(xy_seq, torch.Tensor):
+          xy_seq = torch.from_numpy(xy_seq).to(device)
         xy_seq = torch.cat([xy_seq, nextxy_seq], 1)
       
       # Early stopping
@@ -298,7 +379,9 @@ class SketchDecoder(nn.Module):
       if len(left_idx) == 0:
         break # no more jobs to do
       else:
-        pixel_seq = pixel_seq[left_idx]
+        # print('pixel_seq-6', pixel_seq.shape)
+        pixel_seq = pixel_seq[left_idx] # 这步减小 pixel_seq[0] 的长度，WHY?
+        # print('pixel_seq-7', pixel_seq.shape)
         xy_seq = xy_seq[left_idx]
         text = text[left_idx]
     

@@ -18,7 +18,9 @@ cfg = {
     'pos_emb_path': None,
 }
 
-device = torch.device("cuda:0")
+# device = torch.device("cuda:0")
+device = torch.device("cpu")
+
 
 # 加载分词器
 tokenizer = AutoTokenizer.from_pretrained(cfg['tokenizer_name'])
@@ -135,42 +137,65 @@ class SketchDecoder(nn.Module):
     if pos_emb_path is not None:
       self.text_pos_emb = nn.Embedding.from_pretrained(torch.load(pos_emb_path, map_location='cpu'))
       assert self.embed_dim == self.text_pos_emb.weight.shape[1], 'emb_dim must match pretrained text embedded dim'
-
-  def forward(self, pix, xy, text, return_loss=False):
+  
+#   @torch.jit.script
+  def forward(self, pix, xy, text, sign, return_loss=False):
     '''
     pix.shape  [batch_size, max_len]
     xy.shape   [batch_size, max_len, 2]
     mask.shape [batch_size, max_len]
     text.shape [batch_size, text_len]
     '''
-    pixel_v = pix[:, :-1] if return_loss else pix
-    xy_v = xy[:, :-1] if return_loss else xy
+    pixel_v = pix
+    xy_v = xy
     # pixel_mask = mask[:, :-1] if return_loss else mask
 
     c_bs, c_seqlen, device = text.shape[0], text.shape[1], text.device
-    if pixel_v[0] is not None:
+    # if pixel_v[0] is not None:
+    # if not (pixel_v == 0).all():
+    # if not k == text.shape[1]:
+    if sign != 0:
       c_seqlen += pixel_v.shape[1]  
+    # c_seqlen += torch.where(not k == text.shape[1], pix.shape[1], torch.tensor(0))
 
     # Context embedding values
     context_embedding = torch.zeros((1, c_bs, self.embed_dim)).to(device) # [1, bs, dim]
 
     # tokens.shape [batch_size, text_len, emb_dim]
     tokens = self.text_emb(text)
+    # print('tokens', tokens) # device='cuda:0'
 
     # Data input embedding
-    if pixel_v[0] is not None:
+    # if pixel_v[0] is not None:
+    # if not (pixel_v == 0).all():
+    # if not k == text.shape[1]:
+    if sign != 0:
       # coord_embed.shape [batch_size, max_len-1, emb_dim]
       # pixel_embed.shape [batch_size, max_len-1, emb_dim] 
+    #   print('xy_v', xy_v)
+    #   print('xy_v0', xy_v[...,0])
+    #   print('xy_v1', xy_v[...,1])
       coord_embed = self.coord_embed_x(xy_v[...,0]) + self.coord_embed_y(xy_v[...,1]) # [bs, vlen, dim]
+    #   print('coord_embed', coord_embed)
       pixel_embed = self.pixel_embed(pixel_v)
+    #   print('pixel_embed', pixel_embed)
       embed_inputs = pixel_embed + coord_embed
+    #   print('embed_inputs', embed_inputs)
 
       # tokens.shape [batch_size, text_len+max_len-1, emb_dim]
       tokens = torch.cat((tokens, embed_inputs), dim=1)
+    #   print('tokens', tokens)
+    
+    # coord_embed = torch.where(not k == text.shape[1], self.coord_embed_x(xy[...,0]) + self.coord_embed_y(xy[...,1]), torch.zeros_like(xy))
+    # pixel_embed = torch.where(not k == text.shape[1], self.pixel_embed(pix), torch.zeros_like(pix))
+    # embed_inputs = torch.where(not k == text.shape[1],pixel_embed + coord_embed, torch.zeros_like(xy))
+    # tokens = torch.where(not k == text.shape[1], torch.cat((tokens, embed_inputs), dim=1), tokens)
 
     # embeddings.shape [text_len+1 or text_len+max_len, batch_size, emb_dim]
     embeddings = torch.cat([context_embedding, tokens.transpose(0,1)], axis=0)
+    # print('embeddings', embeddings)
     decoder_inputs = self.pos_embed(embeddings) 
+    # print('decoder_inputs', decoder_inputs)
 
     memory_encode = torch.zeros((1, c_bs, self.embed_dim)).to(device)
     
@@ -228,21 +253,68 @@ sketch_decoder.load_state_dict(torch.load("/home/stone/Desktop/AnyFont/IconShop/
 # 设置为评估模式
 sketch_decoder.to(device).eval()
 
-# 定义示例输入
-pixel_seq = torch.randint(low=0, high=100, size=(4, 1)).to(device)
-xy_seq = torch.randint(low=0, high=100, size=(4, 1, 2)).to(device)
-text = torch.randint(0, tokenizer.vocab_size, (4, cfg['text_len'])).to(device)
+n_samples =4
 
-input_dict = (pixel_seq, xy_seq, text)
+# # 定义示例输入 for 初始化
+# sign = 0
+# pixel_seq = torch.randint(0, BBOX+COORD_PAD+SVG_END, (n_samples, 1), device=device)
+# xy_seq = torch.randint(0, BBOX+COORD_PAD+SVG_END, (n_samples, 1, 2), device=device)
+
+sign = 1
+# 定义示例输入
+pixel_seq = torch.randint(0, BBOX+COORD_PAD+SVG_END, (n_samples, 2), device=device)
+xy_seq = torch.randint(0, BBOX+COORD_PAD+SVG_END, (n_samples, 2, 2), device=device)
+
+# 直接赋值给 pixel_seq
+# pixel_seq = torch.tensor([
+#     [3, 5668],
+#     [3, 8275],
+#     [3, 8072],
+#     [3, 8276],
+#     [3, 6873],
+#     [3, 6267],
+#     [3, 6268],
+#     [3, 3271]
+# ], device=device)
+
+# # 直接赋值给 xy_seq
+# xy_seq = torch.tensor([
+#     [[3, 3], [68, 34]],
+#     [[3, 3], [75, 47]],
+#     [[3, 3], [72, 46]],
+#     [[3, 3], [76, 47]],
+#     [[3, 3], [73, 40]],
+#     [[3, 3], [67, 37]],
+#     [[3, 3], [68, 37]],
+#     [[3, 3], [71, 22]]
+# ], device=device)
+text = torch.randint(0, tokenizer.vocab_size, (n_samples, cfg['text_len']), device=device) # int64
+
+# scripted_SketchDecoder = torch.jit.script(sketch_decoder)
+
+# print(scripted_SketchDecoder.code)
+
+
+# Convert to ScriptModule using torch.jit.script
+scripted_model = torch.jit.script(sketch_decoder(pixel_seq, xy_seq, text, sign))
+
+
+input_dict = (pixel_seq, xy_seq, text, sign)
+
 
 # 转换为 ONNX
 torch.onnx.export(
-    sketch_decoder,
+    scripted_model,
     input_dict,
-    "pytorch_model.onnx",
-    input_names=['pixel_seq', 'xy_seq','input'],
+    # f"iconshop_{sign}.onnx",
+    "iconshop_scripted.onnx",
+    input_names=['pixel_seq', 'xy_seq','text', 'sign'],
     output_names=['output'],
-    dynamic_axes={'input': {0: 'batch_size'}, 
+    dynamic_axes={'pixel_seq': {0: 'batch_size',
+                                1: 'max_len'},
+                  'xy_seq': {0: 'batch_size',
+                             1: 'max_len'},
+                  'text': {0: 'batch_size'}, 
                   'output': {0: 'batch_size'}},
     opset_version=14
 )
